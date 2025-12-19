@@ -3,7 +3,7 @@ import asyncio
 import logging
 import json
 from datetime import datetime
-import pytz # برای تنظیم دقیق زمان ایران
+import pytz
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, types, F
@@ -16,25 +16,29 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import aiohttp
 
-# --- پیکربندی ---
+# --- تنظیمات اختصاصی ---
 API_TOKEN = '8363878660:AAHoIKwGNw1P32dot-atLmGtei2o65xTdgc'
 GROUP_ID = -4843735218
 API_URL = 'https://price.tlyn.ir/api/v1/price'
 BASE_URL = "https://gold-w3ch.onrender.com" 
 WEBHOOK_PATH = f"/bot/{API_TOKEN}"
-TIMEZONE = pytz.timezone('Asia/Tehran')
+TEHRAN_TZ = pytz.timezone('Asia/Tehran')
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
-scheduler = AsyncIOScheduler(timezone=TIMEZONE)
+scheduler = AsyncIOScheduler(timezone=TEHRAN_TZ)
 DB_ALERTS = "alerts.json"
 
 class BotStates(StatesGroup):
     waiting_for_convert = State()
     waiting_for_alert_value = State()
 
-# --- توابع مدیریت داده ---
+# --- توابع کمکی ---
+def fa_to_en(number):
+    """تبدیل اعداد فارسی به انگلیسی برای جلوگیری از خطا در محاسبات"""
+    return str(number).translate(str.maketrans('۰۱۲۳۴۵۶۷۸۹', '0123456789'))
+
 def load_alerts():
     if not os.path.exists(DB_ALERTS): return {}
     try:
@@ -52,117 +56,139 @@ async def get_prices():
             async with session.get(API_URL, headers=headers, timeout=15) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    # استخراج قیمت‌ها و تبدیل به ریال (ضرب در 1000 طبق ساختار API)
+                    # استخراج قیمت‌ها و تبدیل به ریال
                     return {item['title']: int(item['price']['sell'] * 1000) for item in data['prices']}
     except Exception as e:
-        logging.error(f"Error in fetching prices: {e}")
+        logging.error(f"Fetch Error: {e}")
     return None
 
-# --- هندلرهای اصلاح شده ---
+# --- هندلرهای پیام ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
     kb = ReplyKeyboardBuilder()
     kb.row(types.KeyboardButton(text="💰 قیمت‌های لحظه‌ای"), types.KeyboardButton(text="🔄 تبدیل‌گر واحد"))
     kb.row(types.KeyboardButton(text="🔔 ثبت هشدار قیمت"), types.KeyboardButton(text="📊 محاسبه حباب سکه"))
-    await message.answer("💎 **به دستیار هوشمند بازار طلا خوش آمدید**\nوضعیت زمان‌بندی: فعال ✅", reply_markup=kb.as_markup(resize_keyboard=True))
-
-# اصلاح بخش تبدیل‌گر (دیباگ شده)
-@dp.message(F.text == "🔄 تبدیل‌گر واحد")
-async def converter_init(message: types.Message, state: FSMContext):
-    await state.set_state(BotStates.waiting_for_convert)
-    await message.answer("💸 مبلغ مورد نظر خود را به **تومان** وارد کنید:\n(مثلاً: 10000000)")
-
-@dp.message(BotStates.waiting_for_convert)
-async def converter_proc(message: types.Message, state: FSMContext):
-    input_text = message.text.strip()
-    if not input_text.isdigit():
-        return await message.answer("⚠️ لطفاً فقط عدد انگلیسی وارد کنید.")
-    
-    toman_amount = int(input_text)
-    rial_amount = toman_amount * 10 # تبدیل تومان به ریال برای محاسبات
-    prices = await get_prices()
-    
-    if not prices:
-        return await message.answer("❌ خطا در دریافت قیمت‌ها.")
-
-    # جستجوی هوشمند برای قیمت طلا (ممکن است نام در API تغییر کند)
-    gold_price = 0
-    for key in prices:
-        if "۱۸ عیار" in key or "18 عیار" in key:
-            gold_price = prices[key]
-            break
-    
-    if gold_price > 0:
-        result = rial_amount / gold_price
-        text = f"⚖️ **تحلیل خرید با {toman_amount:,} تومان:**\n\n"
-        text += f"🔸 معادل طلا: `{round(result, 3)}` گرم ۱۸ عیار\n"
-        text += f"🔹 قیمت مبنا: `{gold_price:,}` ریال"
-        await message.answer(text, parse_mode="Markdown")
-    else:
-        await message.answer("❌ متاسفانه قیمت طلای ۱۸ عیار در لیست یافت نشد.")
-    
-    await state.clear()
-
-# اصلاح بخش حباب
-@dp.message(F.text == "📊 محاسبه حباب سکه")
-async def bubble_calc(message: types.Message):
-    prices = await get_prices()
-    if not prices: return await message.answer("خطا در دریافت اطلاعات.")
-    text = "🧼 **حباب تقریبی سکه:**\n\n"
-    for s in ["سکه تمام", "نیم سکه", "ربع سکه"]:
-        p = prices.get(s, 0)
-        if p > 0:
-            text += f"🔸 {s}: `{int(p * 0.14):,}` ریال\n"
-    await message.answer(text, parse_mode="Markdown")
+    await message.answer("💎 **دستیار هوشمند بازار طلا و سکه**\n\nوضعیت سرور: عملیاتی ✅\nزمان‌بندی: فعال 🕒", 
+                         reply_markup=kb.as_markup(resize_keyboard=True))
 
 @dp.message(F.text == "💰 قیمت‌های لحظه‌ای")
 async def show_prices(message: types.Message):
     prices = await get_prices()
-    if not prices: return await message.answer("❌ خطا.")
-    text = f"🕒 **بروزرسانی:** {datetime.now(TIMEZONE).strftime('%H:%M')}\n\n"
-    for k, v in list(prices.items())[:8]:
-        text += f"🔹 {k}: `{v:,}` ریال\n"
+    if not prices: return await message.answer("❌ خطا در دریافت اطلاعات از بازار.")
+    
+    text = f"🕒 **بروزرسانی:** {datetime.now(TEHRAN_TZ).strftime('%H:%M:%S')}\n\n"
+    for title, val in list(prices.items())[:7]:
+        text += f"🔹 {title}: `{val:,}` ریال\n"
     await message.answer(text, parse_mode="Markdown")
 
-# --- سیستم هشدار اصلاح شده ---
+@dp.message(F.text == "🔄 تبدیل‌گر واحد")
+async def converter_init(message: types.Message, state: FSMContext):
+    await state.set_state(BotStates.waiting_for_convert)
+    await message.answer("💸 مبلغ مورد نظر را به **تومان** وارد کنید:")
+
+@dp.message(BotStates.waiting_for_convert)
+async def converter_proc(message: types.Message, state: FSMContext):
+    clean_text = fa_to_en(message.text.strip())
+    if not clean_text.isdigit():
+        return await message.answer("⚠️ لطفاً فقط عدد وارد کنید.")
+    
+    amount_toman = int(clean_text)
+    amount_rial = amount_toman * 10
+    prices = await get_prices()
+    
+    if not prices: return await message.answer("❌ خطا در دریافت قیمت‌ها.")
+
+    # جستجوی هوشمند قیمت طلا و سکه
+    gold_p = next((v for k, v in prices.items() if "۱۸ عیار" in k or "18 عیار" in k), 0)
+    coin_p = next((v for k, v in prices.items() if "سکه تمام" in k), 0)
+
+    if gold_p > 0:
+        gold_res = amount_rial / gold_p
+        coin_res = amount_rial / coin_p if coin_p > 0 else 0
+        
+        text = f"⚖️ **تحلیل خرید با {amount_toman:,} تومان:**\n\n"
+        text += f"🔸 طلا ۱۸ عیار: `{round(gold_res, 3)}` گرم\n"
+        if coin_res > 0: text += f"🔸 سکه تمام: `{round(coin_res, 2)}` عدد\n"
+        text += f"\n🔹 قیمت مبنا: `{gold_p:,}` ریال"
+        await message.answer(text, parse_mode="Markdown")
+    else:
+        await message.answer("❌ قیمت طلا در لیست یافت نشد.")
+    await state.clear()
+
+@dp.message(F.text == "📊 محاسبه حباب سکه")
+async def bubble_calc(message: types.Message):
+    prices = await get_prices()
+    if not prices: return await message.answer("❌ خطا.")
+    text = "🧼 **حباب تقریبی سکه:**\n\n"
+    for s in ["سکه تمام", "نیم سکه", "ربع سکه"]:
+        p = prices.get(s, 0)
+        if p > 0: text += f"🔸 {s}: `{int(p * 0.14):,}` ریال\n"
+    await message.answer(text, parse_mode="Markdown")
+
 @dp.message(F.text == "🔔 ثبت هشدار قیمت")
 async def alert_menu(message: types.Message):
     builder = InlineKeyboardBuilder()
-    items = ["گرم طلا عیار ۱۸", "سکه تمام", "نیم سکه", "ربع سکه"]
-    for item in items:
-        builder.row(types.InlineKeyboardButton(text=item, callback_data=f"set:{item}"))
-    await message.answer("🎯 آیتم مورد نظر را انتخاب کنید:", reply_markup=builder.as_markup())
+    for i in ["گرم طلا عیار ۱۸", "سکه تمام", "نیم سکه", "ربع سکه"]:
+        builder.row(types.InlineKeyboardButton(text=i, callback_data=f"set:{i}"))
+    await message.answer("🎯 آیتم را برای دیده‌بانی انتخاب کنید:", reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data.startswith("set:"))
 async def alert_step2(callback: types.CallbackQuery, state: FSMContext):
     item = callback.data.split(":")[1]
     await state.update_data(item=item)
-    await callback.message.edit_text(f"📉 قیمت هدف (به ریال) برای **{item}** را وارد کنید:")
+    await callback.message.edit_text(f"📉 قیمت هدف (**به ریال**) برای {item} را بفرستید:")
     await state.set_state(BotStates.waiting_for_alert_value)
 
 @dp.message(BotStates.waiting_for_alert_value)
 async def alert_final(message: types.Message, state: FSMContext):
-    if not message.text.isdigit(): return await message.answer("⚠️ عدد نامعتبر.")
+    clean_val = fa_to_en(message.text.strip())
+    if not clean_val.isdigit(): return await message.answer("⚠️ عدد نامعتبر.")
+    
     data = await state.get_data()
-    item, target = data['item'], int(message.text)
+    item, target = data['item'], int(clean_val)
     alerts = load_alerts()
     uid = str(message.from_user.id)
     if uid not in alerts: alerts[uid] = {}
     alerts[uid][item] = target
     save_alerts(alerts)
-    await message.answer(f"✅ ثبت شد. اگر {item} به {target:,} ریال برسد خبرتان می‌دهم.")
+    
+    await message.answer(f"✅ ثبت شد. به محض رسیدن {item} به {target:,} ریال خبرتان می‌دهم.")
     await state.clear()
 
-# --- تنظیمات Webhook و اتوماسیون (اصلاح شده) ---
+# --- سیستم خودکار و سرور ---
+async def check_alerts_task():
+    prices = await get_prices()
+    if not prices: return
+    alerts = load_alerts()
+    changed = False
+    for uid, u_alerts in list(alerts.items()):
+        for item, target in list(u_alerts.items()):
+            # جستجوی منعطف برای هشدار
+            current = next((v for k, v in prices.items() if item in k), 0)
+            if current > 0 and current <= target:
+                try:
+                    await bot.send_message(uid, f"🚨 **هشدار خرید!**\n\n{item} به قیمت هدف شما ({target:,}) رسید.\nقیمت فعلی: `{current:,}` ریال")
+                    del alerts[uid][item]
+                    changed = True
+                except: pass
+    if changed: save_alerts(alerts)
+
+async def auto_report():
+    prices = await get_prices()
+    if prices:
+        text = "📢 **گزارش وضعیت بازار**\n\n"
+        for i in ["گرم طلا عیار ۱۸", "سکه تمام", "نیم سکه"]:
+            p = next((v for k, v in prices.items() if i in k), 0)
+            if p > 0: text += f"▪️ {i}: `{p:,}` ریال\n"
+        try: await bot.send_message(GROUP_ID, text, parse_mode="Markdown")
+        except Exception as e: logging.error(f"Group send error: {e}")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # تنظیم مجدد وب‌هوک در هر بار اجرا
     await bot.set_webhook(url=BASE_URL + WEBHOOK_PATH, drop_pending_updates=True)
     if not scheduler.running:
-        # چک کردن هشدارها هر ۵ دقیقه
         scheduler.add_job(check_alerts_task, 'interval', minutes=5)
-        # گزارش‌های ساعت ۱۲
         scheduler.add_job(auto_report, 'cron', hour=12, minute=0)
         scheduler.add_job(auto_report, 'cron', hour=0, minute=0)
         scheduler.start()
@@ -178,28 +204,4 @@ async def bot_webhook(request: Request):
     return {"ok": True}
 
 @app.get("/")
-async def health(): return {"status": "ok", "time": datetime.now(TIMEZONE).isoformat()}
-
-async def check_alerts_task():
-    prices = await get_prices()
-    if not prices: return
-    alerts = load_alerts()
-    for uid, u_alerts in list(alerts.items()):
-        for item, target in list(u_alerts.items()):
-            current = prices.get(item, 0)
-            if current > 0 and current <= target:
-                try:
-                    await bot.send_message(uid, f"🚨 **هشدار خرید!**\n{item} به قیمت `{current:,}` ریال رسید!")
-                    del alerts[uid][item]
-                except: pass
-    save_alerts(alerts)
-
-async def auto_report():
-    prices = await get_prices()
-    if prices:
-        text = "📢 **گزارش بازار (ارسال خودکار)**\n\n"
-        items = ["گرم طلا عیار ۱۸", "سکه تمام", "نیم سکه"]
-        for i in items:
-            if i in prices: text += f"▪️ {i}: `{prices[i]:,}` ریال\n"
-        try: await bot.send_message(GROUP_ID, text, parse_mode="Markdown")
-        except: pass
+async def health(): return {"status": "active", "timezone": "Asia/Tehran"}
